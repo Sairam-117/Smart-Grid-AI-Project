@@ -23,12 +23,9 @@ except Exception as e:
 NUM_GENERATORS = 3
 NUM_SUBSTATIONS = 6
 NUM_CONSUMERS = 10
-TIME_STEP = 60  # Starting at index 60 so we have a full window to look back at
+TIME_STEP = 60
 
-# ⚠️ YOU MUST ADJUST THIS BASED ON YOUR MODEL'S OUTPUT ⚠️
-# If your model outputs 0 to 1, set this to something like 0.8
-# If your model outputs raw power like 100-500, set this to 300
-SPIKE_THRESHOLD = 0.4
+SPIKE_THRESHOLD = 0.32  # Set lower for hyper-sensitive demo mode
 
 
 def create_grid():
@@ -39,10 +36,9 @@ def create_grid():
 
     for g in generators: G.add_node(g, type="generator", capacity=random.randint(250, 400))
     for s in substations: G.add_node(s, type="substation")
-    for c in consumers: G.add_node(c, type="consumer", priority=1)
 
-    # Focus Node for Live Data
-    G.nodes["C0"]["priority"] = 5
+    # NEW: Assign random priority tiers (1 to 5) to ALL consumers
+    for c in consumers: G.add_node(c, type="consumer", priority=random.randint(1, 5))
 
     for g in generators:
         for s in random.sample(substations, k=3):
@@ -101,54 +97,55 @@ def distribute_energy(G, generators, consumers, demands):
 G, generators, substations, consumers = create_grid()
 pos = layered_layout(generators, substations, consumers)
 fig, ax = plt.subplots(figsize=(16, 9))
-fig.canvas.manager.set_window_title('SGMS: Live AI Data Integration')
+fig.canvas.manager.set_window_title('SGMS: Dynamic Priority Routing')
 
 
 def animate(frame):
     global TIME_STEP
     ax.clear()
 
-    # 1. THE DATA PIPELINE: Slicing the 3D Tensor
     if TIME_STEP >= len(live_data):
-        TIME_STEP = 60  # Reset if we run out of data
+        TIME_STEP = 60
 
-    # Slicing exactly 60 rows and all 7 columns
     window = live_data[TIME_STEP - 60: TIME_STEP, :]
-    # Expanding dimensions from (60,7) to (1,60,7)
     tensor_input = np.expand_dims(window, axis=0)
 
-    # 2. LIVE AI INFERENCE
     raw_prediction = model.predict(tensor_input, verbose=0)
-    predicted_value = float(raw_prediction[0][0])  # Extracting the pure number
+    predicted_value = float(raw_prediction[0][0])
 
-    # Console logging so you can calibrate your threshold tonight
     print(f"Step {TIME_STEP} | Raw AI Output: {predicted_value:.4f}")
 
-    # 3. MAPPING INFERENCE TO THE GRAPH
     demands = {c: random.randint(20, 50) for c in consumers}
-    ai_status = f"AI MONITOR | LIVE INFERENCE: {predicted_value:.2f}"
-    ai_color = "green"
+    critical_node = None  # Initialize empty for rendering logic
 
-    # If the AI predicts a spike based on the live data:
     if predicted_value > SPIKE_THRESHOLD:
-        ai_status = f"AI WARNING: ANOMALY DETECTED IN LIVE STREAM (Value: {predicted_value:.2f})\nREROUTING CAPACITY TO NODE C0"
+        # --- THE DYNAMIC ROUTING ALGORITHM ---
+        # 1. Calculate Severity Score for all nodes (Demand * Priority)
+        severity_scores = {c: demands[c] * G.nodes[c]["priority"] for c in consumers}
+
+        # 2. Identify the node in the most critical danger
+        critical_node = max(severity_scores, key=severity_scores.get)
+        critical_priority = G.nodes[critical_node]['priority']
+
+        ai_status = f"AI WARNING: ANOMALY (Val: {predicted_value:.2f})\nREROUTING TO CRITICAL NODE: {critical_node} (Pri: {critical_priority})"
         ai_color = "red"
 
-        # Scale the demand based on the AI output to force a visual change
+        # 3. Dynamically route emergency power to the critical node
         scaled_demand = int(predicted_value * 200) if predicted_value < 1.0 else int(predicted_value)
-        demands["C0"] = max(150, scaled_demand)
+        demands[critical_node] = max(150, scaled_demand)
 
-        # Graph dynamically thickens transmission lines to C0
         for u, v in G.edges():
-            if v == "C0":
+            if v == critical_node:
                 G[u][v]["capacity"] = 350
+            elif G.nodes[v]["type"] == "consumer":
+                G[u][v]["capacity"] = 100
     else:
-        # Reset graph capacities when data is normal
+        ai_status = f"AI MONITOR | LIVE INFERENCE: {predicted_value:.2f}"
+        ai_color = "green"
         for u, v in G.edges():
-            if v == "C0":
+            if G.nodes[v]["type"] == "consumer":
                 G[u][v]["capacity"] = 100
 
-    # 4. ROUTE AND RENDER
     alloc = distribute_energy(G, generators, consumers, demands)
     flows = [G[u][v]["flow"] for u, v in G.edges()]
     widths = [f / 15 + 1 for f in flows]
@@ -162,7 +159,8 @@ def animate(frame):
             sizes.append(800); colors.append("#ffa64d")
         else:
             sizes.append(400)
-            if n == "C0" and predicted_value > SPIKE_THRESHOLD:
+            # Highlight the dynamically chosen node
+            if n == critical_node and predicted_value > SPIKE_THRESHOLD:
                 colors.append("yellow")
             else:
                 colors.append("#4da6ff")
@@ -178,14 +176,16 @@ def animate(frame):
             txt = f"\nFlow:{incoming}"
         else:
             incoming = sum(G[u][n]["flow"] for u in G.predecessors(n))
-            txt = f"\nReq:{demands[n]}\nGot:{incoming}"
+            priority_val = G.nodes[n]['priority']
+            # Output the Priority on the screen so the HOD can see the math
+            txt = f"\nPri:{priority_val}\nReq:{demands[n]}\nGot:{incoming}"
         ax.text(x, y - 1.2, txt, fontsize=9, ha="center", bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
 
     ax.set_title(f"LIVE DATA INTEGRATION: LSTM PREDICTIVE ROUTING\nStep: {TIME_STEP}", fontsize=14, pad=20)
     ax.text(0.5, 0.95, ai_status, transform=ax.transAxes, fontsize=12, ha='center', va='center',
             color='white', fontweight='bold', bbox=dict(facecolor=ai_color, alpha=0.8, pad=10))
 
-    TIME_STEP += 1  # Advance the data stream by one row
+    TIME_STEP += 1
 
 
 ani = animation.FuncAnimation(fig, animate, frames=60, interval=1000)
